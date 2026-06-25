@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Random Team Picker</title>
+
+<!-- Tailwind CSS via CDN (Play CDN compiles classes at runtime, including dynamic ones) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- SheetJS for reading .xlsx / .xls files -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+  /* ---- Small custom touches on top of Tailwind ---- */
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+  /* Subtle pulsing ring to highlight the team whose turn it is */
+  @keyframes turnPulse {
+    0%, 100% { box-shadow: 0 0 0 0 var(--team-color); }
+    50%      { box-shadow: 0 0 0 6px transparent; }
+  }
+  .is-turn { animation: turnPulse 1.6s ease-in-out infinite; }
+
+  /* Member chip pop-in when added to a team */
+  @keyframes popIn {
+    0%   { transform: scale(.7); opacity: 0; }
+    60%  { transform: scale(1.06); }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .pop-in { animation: popIn .35s ease-out; }
+
+  /* Roulette name flicker */
+  @keyframes spinFlash {
+    0% { opacity: .35; transform: translateY(8px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  .spin-name { animation: spinFlash .08s ease-out; }
+
+  /* Reveal bounce for the final chosen name */
+  @keyframes reveal {
+    0%   { transform: scale(.5) rotate(-4deg); opacity: 0; }
+    50%  { transform: scale(1.15) rotate(2deg); }
+    100% { transform: scale(1) rotate(0); opacity: 1; }
+  }
+  .reveal { animation: reveal .5s cubic-bezier(.18,.89,.32,1.28); }
+
+  /* Thin scrollbars for the lists */
+  .nice-scroll::-webkit-scrollbar { width: 8px; }
+  .nice-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; }
+  .nice-scroll::-webkit-scrollbar-track { background: transparent; }
+
+  /* Confetti dot */
+  .confetti {
+    position: absolute; width: 10px; height: 10px; top: -10px;
+    border-radius: 2px; pointer-events: none;
+    animation: fall 1.4s linear forwards;
+  }
+  @keyframes fall {
+    to { transform: translateY(110vh) rotate(540deg); opacity: 0; }
+  }
+</style>
+</head>
+
+<body class="bg-slate-100 text-slate-800 min-h-screen">
+
+<!-- ============================= HEADER ============================= -->
+<header class="bg-white shadow-sm sticky top-0 z-30">
+  <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3 justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 flex items-center justify-center text-white text-xl shadow">
+        🎲
+      </div>
+      <div>
+        <h1 class="text-xl font-bold leading-tight">Random Team Picker</h1>
+        <p class="text-xs text-slate-500">Fair, fun and balanced team building</p>
+      </div>
+    </div>
+
+    <!-- Top control buttons -->
+    <div class="flex flex-wrap items-center gap-2">
+      <button id="btnImport" class="px-3 py-2 rounded-lg text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition shadow-sm">⬆ Import / Add</button>
+      <button id="btnSample" class="px-3 py-2 rounded-lg text-sm font-semibold bg-slate-200 hover:bg-slate-300 text-slate-700 transition">✨ Load Sample (45)</button>
+      <button id="btnAuto"   class="px-3 py-2 rounded-lg text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white transition shadow-sm">⚖ Auto Assign</button>
+      <button id="btnExport" class="px-3 py-2 rounded-lg text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white transition shadow-sm">⬇ Export</button>
+      <button id="btnReset"  class="px-3 py-2 rounded-lg text-sm font-semibold bg-rose-100 hover:bg-rose-200 text-rose-700 transition">↺ Reset All</button>
+    </div>
+  </div>
+</header>
+
+<!-- ============================= MAIN LAYOUT ============================= -->
+<main class="max-w-7xl mx-auto px-4 py-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+
+  <!-- ---------- LEFT: Unassigned pool ---------- -->
+  <section class="lg:col-span-4 bg-white rounded-2xl shadow-sm flex flex-col" style="max-height: calc(100vh - 130px)">
+    <div class="p-4 border-b">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-bold text-lg">Unassigned</h2>
+        <span id="poolCount" class="text-sm font-semibold bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full">0</span>
+      </div>
+      <div class="relative">
+        <input id="search" type="text" placeholder="Search name…"
+          class="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 outline-none text-sm" />
+        <span class="absolute left-3 top-2.5 text-slate-400">🔍</span>
+      </div>
+      <div class="flex items-center gap-2 mt-3">
+        <label class="text-xs text-slate-500">Pick per turn</label>
+        <input id="pickCount" type="number" min="1" value="1"
+          class="w-16 px-2 py-1 rounded-md border border-slate-200 text-sm text-center" />
+        <span class="text-xs text-slate-400">people each press</span>
+      </div>
+    </div>
+    <div id="poolList" class="p-3 overflow-y-auto nice-scroll flex-1 space-y-1.5"></div>
+  </section>
+
+  <!-- ---------- RIGHT: 4 Team cards ---------- -->
+  <section class="lg:col-span-8 grid grid-cols-1 md:grid-cols-2 gap-4" id="teamGrid"></section>
+
+</main>
+
+<!-- ============================= IMPORT MODAL ============================= -->
+<div id="importModal" class="fixed inset-0 z-40 hidden bg-black/40 backdrop-blur-sm items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto nice-scroll">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-bold">Add People</h3>
+      <button data-close-modal="importModal" class="text-slate-400 hover:text-slate-700 text-xl">✕</button>
+    </div>
+
+    <!-- Excel import -->
+    <div class="mb-5">
+      <p class="text-sm font-semibold mb-1">1 · Import from Excel (.xlsx)</p>
+      <p class="text-xs text-slate-500 mb-2">First row = headers. Supports <b>Name</b>, <b>Gender</b> and any extra Type columns (Seniority, Department, Level…).</p>
+      <input id="fileInput" type="file" accept=".xlsx,.xls,.csv"
+        class="block w-full text-sm text-slate-600 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 file:cursor-pointer" />
+      <button id="btnTemplate" class="mt-2 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:text-emerald-800 hover:underline">
+        ⬇ Download Excel template
+      </button>
+    </div>
+
+    <!-- CSV paste -->
+    <div class="mb-4">
+      <p class="text-sm font-semibold mb-1">2 · Or paste CSV</p>
+      <p class="text-xs text-slate-500 mb-2">Example: <code>Name,Gender,Department,Seniority</code></p>
+      <textarea id="csvInput" rows="6" placeholder="Name,Gender,Department&#10;Jordan,Female,Sales&#10;Chris,Male,Engineering"
+        class="w-full p-3 rounded-lg border border-slate-200 text-sm font-mono outline-none focus:border-blue-400"></textarea>
+      <button id="btnParseCsv" class="mt-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold">Add from CSV</button>
+    </div>
+
+    <!-- Quick single add -->
+    <div class="border-t pt-4">
+      <p class="text-sm font-semibold mb-2">3 · Quick add one person</p>
+      <div class="flex flex-wrap gap-2">
+        <input id="qName" placeholder="Name" class="flex-1 min-w-[120px] px-3 py-2 rounded-lg border border-slate-200 text-sm" />
+        <select id="qGender" class="px-3 py-2 rounded-lg border border-slate-200 text-sm">
+          <option value="">Gender</option>
+          <option>Female</option>
+          <option>Male</option>
+        </select>
+        <button id="btnQuickAdd" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-800 text-white text-sm font-semibold">Add</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= ROULETTE OVERLAY ============================= -->
+<div id="rouletteOverlay" class="fixed inset-0 z-50 hidden bg-black/60 backdrop-blur items-center justify-center p-4">
+  <div class="bg-white rounded-3xl shadow-2xl px-10 py-12 text-center w-full max-w-md" id="rouletteCard">
+    <p id="rouletteTeam" class="text-sm font-bold uppercase tracking-wider mb-2">Team</p>
+    <p class="text-xs text-slate-400 mb-6">Picking…</p>
+    <div id="rouletteName" class="text-3xl font-extrabold min-h-[3rem] flex items-center justify-center text-slate-800">—</div>
+    <div id="rouletteExtra" class="mt-3 text-sm text-slate-500"></div>
+  </div>
+</div>
+
+<!-- ============================= TOAST ============================= -->
+<div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 hidden px-4 py-2 rounded-lg bg-slate-800 text-white text-sm shadow-lg"></div>
+
+<script>
+/* =========================================================================
+   CONFIG — edit team names & leaders here. Easy to change later.
+   ========================================================================= */
+const CONFIG = {
+  teams: [
+    { name: "Team Aqua",  leader: "Alex Rivera",  color: "#3b82f6", soft: "#eff6ff" }, // Blue
+    { name: "Team Blaze", leader: "Sam Carter",   color: "#ef4444", soft: "#fef2f2" }, // Red
+    { name: "Team Verde", leader: "Jordan Lee",   color: "#22c55e", soft: "#f0fdf4" }, // Green
+    { name: "Team Nova",  leader: "Taylor Quinn", color: "#a855f7", soft: "#faf5ff" }, // Purple
+  ],
+  storageKey: "randomTeamPicker.v1",
+};
+
+/* =========================================================================
+   STATE
+   ========================================================================= */
+let state = {
+  members: [],     // { id, name, gender, types:{key:value}, team: null|0..3 }
+  typeKeys: [],    // discovered "Type" columns besides Name/Gender (kept hidden on cards)
+  currentTurn: 0,  // which team's turn it is
+  nextId: 1,
+};
+
+const NUM_TEAMS = CONFIG.teams.length;
+
+/* =========================================================================
+   PERSISTENCE (localStorage)
+   ========================================================================= */
+function saveState() {
+  try { localStorage.setItem(CONFIG.storageKey, JSON.stringify(state)); } catch (e) {}
+}
+function loadState() {
+  try {
+    const raw = localStorage.getItem(CONFIG.storageKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.members)) state = Object.assign(state, parsed);
+    }
+  } catch (e) {}
+}
+
+/* =========================================================================
+   HELPERS
+   ========================================================================= */
+const $  = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.add("hidden"), 2200);
+}
+
+function unassigned() { return state.members.filter(m => m.team === null); }
+function teamMembers(i) { return state.members.filter(m => m.team === i); }
+
+/** Even target sizes for each team based on total member count (diff ≤ ±1). */
+function teamTargets() {
+  const total = state.members.length;
+  const base = Math.floor(total / NUM_TEAMS);
+  const rem = total % NUM_TEAMS;
+  return Array.from({ length: NUM_TEAMS }, (_, i) => base + (i < rem ? 1 : 0));
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/* =========================================================================
+   SMART BALANCING (hidden logic)
+   We score how much a candidate would improve balance for a given team by
+   looking at Gender + every discovered Type. A candidate that fills an
+   under-represented attribute on that team scores higher.
+   ========================================================================= */
+/** Max count of a given attribute value across all teams (the "leader" team). */
+function maxAcrossTeams(getter) {
+  let max = 0;
+  for (let i = 0; i < NUM_TEAMS; i++) max = Math.max(max, getter(i));
+  return max;
+}
+
+/**
+ * Balance score: higher = better for balance.
+ * For each attribute value the candidate carries, reward the team that
+ * currently has the fewest of that value (relative to the busiest team).
+ */
+function balanceScore(member, teamIndex) {
+  let score = 0;
+
+  // Gender balance
+  if (member.gender) {
+    const here = teamMembers(teamIndex).filter(m => m.gender === member.gender).length;
+    const max = maxAcrossTeams(i => teamMembers(i).filter(m => m.gender === member.gender).length);
+    score += (max - here) * 2; // weight gender a bit higher
+  }
+
+  // Each Type column
+  state.typeKeys.forEach(k => {
+    const v = member.types[k];
+    if (v == null || v === "") return;
+    const here = teamMembers(teamIndex).filter(m => m.types[k] === v).length;
+    const max = maxAcrossTeams(i => teamMembers(i).filter(m => m.types[k] === v).length);
+    score += (max - here);
+  });
+
+  return score;
+}
+
+/**
+ * Pick `count` members for a team using balance-aware weighted randomness.
+ * We rank candidates by balance score, then randomly choose from the best
+ * tier so it still feels random but stays fair.
+ */
+function chooseBalancedPicks(teamIndex, count) {
+  const picks = [];
+  for (let n = 0; n < count; n++) {
+    const pool = unassigned().filter(m => !picks.includes(m));
+    if (pool.length === 0) break;
+
+    const scored = pool.map(m => ({ m, s: balanceScore(m, teamIndex) }));
+    const maxScore = Math.max(...scored.map(x => x.s));
+
+    // Candidates within the top tier keep it fair but still random
+    const topTier = scored.filter(x => x.s >= maxScore - 0.0001).map(x => x.m);
+    const chosen = topTier[Math.floor(Math.random() * topTier.length)];
+    picks.push(chosen);
+  }
+  return picks;
+}
+
+/* =========================================================================
+   RENDERING
+   ========================================================================= */
+function render() {
+  renderPool();
+  renderTeams();
+  saveState();
+}
+
+function renderPool() {
+  const list = $("#poolList");
+  const q = $("#search").value.trim().toLowerCase();
+  const people = unassigned()
+    .filter(m => m.name.toLowerCase().includes(q))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  $("#poolCount").textContent = unassigned().length;
+
+  if (people.length === 0) {
+    list.innerHTML = `<p class="text-center text-sm text-slate-400 py-8">${
+      unassigned().length === 0 ? "🎉 Everyone has been assigned!" : "No matches."
+    }</p>`;
+    return;
+  }
+
+  list.innerHTML = people.map(m => `
+    <div class="flex items-center justify-between bg-slate-50 hover:bg-slate-100 rounded-lg px-3 py-2 group">
+      <span class="text-sm font-medium truncate">${escapeHtml(m.name)}</span>
+      <span class="text-xs text-slate-300 group-hover:text-slate-500">#${m.id}</span>
+    </div>`).join("");
+}
+
+function renderTeams() {
+  const grid = $("#teamGrid");
+  const targets = teamTargets();
+
+  grid.innerHTML = CONFIG.teams.map((team, i) => {
+    const members = teamMembers(i).sort((a, b) => a.name.localeCompare(b.name));
+    const target = targets[i] || 0;
+    const pct = target > 0 ? Math.min(100, Math.round((members.length / target) * 100)) : 0;
+    const isTurn = state.currentTurn === i;
+
+    return `
+      <div class="rounded-2xl bg-white shadow-sm overflow-hidden border-2 ${isTurn ? "is-turn" : "border-transparent"}"
+           style="--team-color:${team.color}; ${isTurn ? `border-color:${team.color}` : ""}">
+        <!-- Card header -->
+        <div class="px-4 py-3 text-white" style="background:${team.color}">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="font-bold leading-tight">${escapeHtml(team.name)}</h3>
+              <p class="text-xs opacity-90">👑 Leader: ${escapeHtml(team.leader)}</p>
+            </div>
+            <div class="text-right">
+              <div class="text-2xl font-extrabold leading-none">${members.length}<span class="text-sm font-medium opacity-80">/${target}</span></div>
+              ${isTurn ? `<span class="text-[10px] font-bold uppercase tracking-wide bg-white/25 px-2 py-0.5 rounded-full">Your turn</span>` : ""}
+            </div>
+          </div>
+          <!-- progress -->
+          <div class="mt-2 h-1.5 rounded-full bg-white/30 overflow-hidden">
+            <div class="h-full bg-white transition-all duration-500" style="width:${pct}%"></div>
+          </div>
+        </div>
+
+        <!-- Members -->
+        <div class="p-3 min-h-[90px]" style="background:${team.soft}">
+          <div class="flex flex-wrap gap-1.5">
+            ${members.map(m => `
+              <span class="pop-in inline-flex items-center gap-1 text-xs font-medium bg-white rounded-full pl-2.5 pr-1 py-1 shadow-sm">
+                ${escapeHtml(m.name)}
+                <button title="Remove" data-remove="${m.id}"
+                  class="w-4 h-4 rounded-full text-slate-400 hover:text-rose-600 hover:bg-rose-50 leading-none">×</button>
+              </span>`).join("") || `<span class="text-xs text-slate-400">No members yet</span>`}
+          </div>
+        </div>
+
+        <!-- Pick button -->
+        <div class="p-3 border-t">
+          <button data-pick="${i}"
+            class="w-full py-2.5 rounded-xl font-bold text-white shadow-sm hover:brightness-110 active:scale-[.98] transition disabled:opacity-40 disabled:cursor-not-allowed"
+            style="background:${team.color}"
+            ${unassigned().length === 0 ? "disabled" : ""}>
+            🎯 Pick Random
+          </button>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, s =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[s]));
+}
+
+/* =========================================================================
+   PICKING + ROULETTE ANIMATION
+   ========================================================================= */
+let isPicking = false;
+
+function pickForTeam(teamIndex) {
+  if (isPicking) return;
+  const pool = unassigned();
+  if (pool.length === 0) { toast("Everyone is already assigned!"); return; }
+
+  let count = parseInt($("#pickCount").value, 10) || 1;
+  count = Math.max(1, Math.min(count, pool.length));
+
+  // Decide the (balanced) winners up front, then animate the suspense.
+  const winners = chooseBalancedPicks(teamIndex, count);
+
+  isPicking = true;
+  const team = CONFIG.teams[teamIndex];
+  const overlay = $("#rouletteOverlay");
+  const nameEl = $("#rouletteName");
+  const teamEl = $("#rouletteTeam");
+  const extraEl = $("#rouletteExtra");
+  const card = $("#rouletteCard");
+
+  teamEl.textContent = team.name;
+  teamEl.style.color = team.color;
+  card.style.borderTop = `6px solid ${team.color}`;
+  extraEl.textContent = count > 1 ? `Picking ${count} people…` : "";
+  overlay.classList.remove("hidden");
+  overlay.classList.add("flex");
+
+  // Spin: flash random names with easing (fast → slow)
+  let elapsed = 0;
+  const totalTime = 1600;
+  function spin() {
+    const r = pool[Math.floor(Math.random() * pool.length)];
+    nameEl.textContent = r.name;
+    nameEl.classList.remove("spin-name"); void nameEl.offsetWidth; nameEl.classList.add("spin-name");
+
+    elapsed += 80 + (elapsed / totalTime) * 140; // gradually slow down
+    if (elapsed < totalTime) {
+      setTimeout(spin, 80 + (elapsed / totalTime) * 140);
+    } else {
+      reveal();
+    }
+  }
+
+  function reveal() {
+    nameEl.classList.remove("spin-name");
+    if (winners.length === 1) {
+      nameEl.textContent = winners[0].name;
+    } else {
+      nameEl.innerHTML = winners.map(w => escapeHtml(w.name)).join(" · ");
+      nameEl.style.fontSize = "1.4rem";
+    }
+    nameEl.classList.add("reveal");
+    extraEl.textContent = `joined ${team.name}!`;
+    burstConfetti(team.color);
+
+    setTimeout(() => {
+      // Commit assignment
+      winners.forEach(w => { w.team = teamIndex; });
+      // Advance turn to the next team (Team1→2→3→4), but any team may pick anytime
+      state.currentTurn = (teamIndex + 1) % NUM_TEAMS;
+
+      overlay.classList.add("hidden");
+      overlay.classList.remove("flex");
+      nameEl.style.fontSize = "";
+      nameEl.classList.remove("reveal");
+      isPicking = false;
+      render();
+    }, 1100);
+  }
+
+  spin();
+}
+
+function burstConfetti(color) {
+  const colors = [color, "#fde047", "#f472b6", "#34d399", "#60a5fa"];
+  for (let i = 0; i < 40; i++) {
+    const c = document.createElement("div");
+    c.className = "confetti";
+    c.style.left = Math.random() * 100 + "vw";
+    c.style.background = colors[Math.floor(Math.random() * colors.length)];
+    c.style.animationDelay = Math.random() * 0.3 + "s";
+    document.body.appendChild(c);
+    setTimeout(() => c.remove(), 1800);
+  }
+}
+
+/* =========================================================================
+   AUTO ASSIGN REMAINING (balanced)
+   Greedy: repeatedly give the smallest team its best-balanced candidate.
+   ========================================================================= */
+function autoAssignRemaining() {
+  const remaining = unassigned().length;
+  if (remaining === 0) { toast("Nothing left to assign."); return; }
+
+  const targets = teamTargets();
+  while (unassigned().length > 0) {
+    // Teams that still have room, sorted by how far below target they are
+    let candidateTeams = [];
+    for (let i = 0; i < NUM_TEAMS; i++) {
+      const need = targets[i] - teamMembers(i).length;
+      if (need > 0) candidateTeams.push({ i, need, size: teamMembers(i).length });
+    }
+    if (candidateTeams.length === 0) {
+      // Targets full but people remain (rounding) → give to smallest team
+      candidateTeams = Array.from({ length: NUM_TEAMS }, (_, i) => ({ i, need: 0, size: teamMembers(i).length }));
+    }
+    candidateTeams.sort((a, b) => a.size - b.size || b.need - a.need);
+    const teamIndex = candidateTeams[0].i;
+
+    const picks = chooseBalancedPicks(teamIndex, 1);
+    if (picks.length === 0) break;
+    picks[0].team = teamIndex;
+  }
+
+  state.currentTurn = 0;
+  render();
+  toast("Remaining members balanced across teams ✓");
+}
+
+/* =========================================================================
+   DATA IMPORT
+   ========================================================================= */
+function addPerson(name, gender, types) {
+  name = (name || "").trim();
+  if (!name) return false;
+  const cleanTypes = {};
+  Object.keys(types || {}).forEach(k => {
+    const val = (types[k] ?? "").toString().trim();
+    if (val) {
+      cleanTypes[k] = val;
+      if (!state.typeKeys.includes(k)) state.typeKeys.push(k);
+    }
+  });
+  state.members.push({
+    id: state.nextId++,
+    name,
+    gender: (gender || "").toString().trim(),
+    types: cleanTypes,
+    team: null,
+  });
+  return true;
+}
+
+/** Turn a row object (keyed by header) into name/gender/types. */
+function ingestRows(rows) {
+  let added = 0;
+  rows.forEach(row => {
+    let name = "", gender = "";
+    const types = {};
+    Object.keys(row).forEach(key => {
+      const k = key.trim();
+      const lk = k.toLowerCase();
+      const val = row[key];
+      if (lk === "name") name = val;
+      else if (lk === "gender" || lk === "sex") gender = val;
+      else if (k) types[k] = val;
+    });
+    if (addPerson(name, gender, types)) added++;
+  });
+  render();
+  toast(`Added ${added} ${added === 1 ? "person" : "people"} ✓`);
+  closeModal("importModal");
+}
+
+function importExcel(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      if (rows.length === 0) { toast("No rows found in file."); return; }
+      ingestRows(rows);
+    } catch (err) {
+      toast("Could not read that file.");
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+/** Minimal CSV parser (handles simple quoted fields). */
+function parseCsv(text) {
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim() !== "");
+  if (lines.length < 2) return [];
+  const splitLine = (line) => {
+    const out = []; let cur = "", inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === "," && !inQ) { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    out.push(cur);
+    return out.map(s => s.trim());
+  };
+  const headers = splitLine(lines[0]);
+  return lines.slice(1).map(line => {
+    const cells = splitLine(line);
+    const obj = {};
+    headers.forEach((h, idx) => obj[h] = cells[idx] ?? "");
+    return obj;
+  });
+}
+
+/* =========================================================================
+   EXPORT (CSV + formatted text)
+   ========================================================================= */
+function exportResults() {
+  // --- CSV ---
+  let csv = "Team,Leader,Member\n";
+  CONFIG.teams.forEach((team, i) => {
+    const ms = teamMembers(i);
+    if (ms.length === 0) {
+      csv += `"${team.name}","${team.leader}",\n`;
+    } else {
+      ms.forEach(m => { csv += `"${team.name}","${team.leader}","${m.name}"\n`; });
+    }
+  });
+  downloadFile("teams.csv", csv, "text/csv");
+
+  // --- Pretty text ---
+  let txt = "🎲  RANDOM TEAM PICKER — RESULTS\n";
+  txt += "=".repeat(40) + "\n\n";
+  CONFIG.teams.forEach((team, i) => {
+    const ms = teamMembers(i);
+    txt += `${team.name}  (Leader: ${team.leader})  —  ${ms.length} members\n`;
+    txt += "-".repeat(40) + "\n";
+    ms.forEach((m, idx) => { txt += `  ${idx + 1}. ${m.name}\n`; });
+    txt += "\n";
+  });
+  const un = unassigned();
+  if (un.length) {
+    txt += `Unassigned (${un.length}):\n`;
+    un.forEach(m => txt += `  • ${m.name}\n`);
+  }
+  downloadFile("teams.txt", txt, "text/plain");
+
+  toast("Exported CSV + text ✓");
+}
+
+/* =========================================================================
+   DOWNLOAD EXCEL TEMPLATE (built on the fly with SheetJS)
+   ========================================================================= */
+function downloadTemplate() {
+  // Header row + a few example people. Name & Gender are recognized specially;
+  // any other column (Department, Seniority…) becomes a balancing "Type".
+  const rows = [
+    ["Name", "Gender", "Department", "Seniority"],
+    ["Jordan Lee",   "Female", "Sales",       "Senior"],
+    ["Chris Morgan", "Male",   "Engineering", "Mid"],
+    ["Taylor Quinn", "Female", "Marketing",   "Junior"],
+    ["Sam Carter",   "Male",   "Design",      "Senior"],
+    ["Alex Rivera",  "Male",   "Support",     "Mid"],
+    ["Robin Hayes",  "Female", "Engineering", "Junior"],
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{ wch: 22 }, { wch: 12 }, { wch: 16 }, { wch: 14 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Members");
+  XLSX.writeFile(wb, "team_import_template.xlsx");
+  toast("Template downloaded ✓");
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/* =========================================================================
+   SAMPLE DATA (45 people) for quick demos
+   ========================================================================= */
+function loadSample() {
+  const first = ["Liam","Olivia","Noah","Emma","Oliver","Ava","Elijah","Sophia","James","Isabella",
+    "William","Mia","Ben","Charlotte","Lucas","Amelia","Henry","Harper","Alex","Evelyn",
+    "Jack","Abigail","Owen","Emily","Leo","Ella","Mason","Grace","Ethan","Chloe",
+    "Logan","Lily","Caleb","Aria","Ryan","Zoe","Nathan","Nora","Daniel","Hannah",
+    "Aaron","Layla","Isaac","Riley","Adam"];
+  const genders = ["Male","Female"];
+  const depts = ["Engineering","Sales","Marketing","Design","Support"];
+  const senior = ["Junior","Mid","Senior"];
+
+  state.members = [];
+  state.typeKeys = [];
+  state.nextId = 1;
+  first.forEach((n, idx) => {
+    addPerson(n, genders[idx % 2], {
+      Department: depts[idx % depts.length],
+      Seniority: senior[idx % senior.length],
+    });
+  });
+  state.currentTurn = 0;
+  render();
+  toast("Loaded 45 sample people ✓");
+}
+
+/* =========================================================================
+   RESET
+   ========================================================================= */
+function resetAll() {
+  if (!confirm("Reset everything? This clears all people and assignments.")) return;
+  state = { members: [], typeKeys: [], currentTurn: 0, nextId: 1 };
+  localStorage.removeItem(CONFIG.storageKey);
+  render();
+  toast("Reset complete.");
+}
+
+/* =========================================================================
+   MODAL HELPERS
+   ========================================================================= */
+function openModal(id)  { const m = $("#" + id); m.classList.remove("hidden"); m.classList.add("flex"); }
+function closeModal(id) { const m = $("#" + id); m.classList.add("hidden"); m.classList.remove("flex"); }
+
+/* =========================================================================
+   EVENT WIRING
+   ========================================================================= */
+function bindEvents() {
+  // Top buttons
+  $("#btnImport").addEventListener("click", () => openModal("importModal"));
+  $("#btnSample").addEventListener("click", loadSample);
+  $("#btnAuto").addEventListener("click", autoAssignRemaining);
+  $("#btnExport").addEventListener("click", exportResults);
+  $("#btnReset").addEventListener("click", resetAll);
+
+  // Search
+  $("#search").addEventListener("input", renderPool);
+
+  // Modal close buttons + backdrop click
+  $$("[data-close-modal]").forEach(b =>
+    b.addEventListener("click", () => closeModal(b.dataset.closeModal)));
+  const importModal = $("#importModal");
+  importModal.addEventListener("click", (e) => {
+    if (e.target === importModal) closeModal("importModal");
+  });
+
+  // Import handlers
+  $("#btnTemplate").addEventListener("click", downloadTemplate);
+  $("#fileInput").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    if (f) importExcel(f);
+    e.target.value = "";
+  });
+  $("#btnParseCsv").addEventListener("click", () => {
+    const rows = parseCsv($("#csvInput").value);
+    if (rows.length === 0) { toast("Need a header row + at least one person."); return; }
+    ingestRows(rows);
+    $("#csvInput").value = "";
+  });
+  $("#btnQuickAdd").addEventListener("click", () => {
+    if (addPerson($("#qName").value, $("#qGender").value, {})) {
+      $("#qName").value = ""; $("#qGender").value = "";
+      render();
+      toast("Person added ✓");
+    }
+  });
+
+  // Delegated clicks for dynamic team buttons (pick / remove)
+  $("#teamGrid").addEventListener("click", (e) => {
+    const pickBtn = e.target.closest("[data-pick]");
+    if (pickBtn) { pickForTeam(parseInt(pickBtn.dataset.pick, 10)); return; }
+    const rmBtn = e.target.closest("[data-remove]");
+    if (rmBtn) {
+      const id = parseInt(rmBtn.dataset.remove, 10);
+      const m = state.members.find(x => x.id === id);
+      if (m) { m.team = null; render(); }
+    }
+  });
+}
+
+/* =========================================================================
+   INIT
+   ========================================================================= */
+loadState();
+bindEvents();
+render();
+</script>
+</body>
+</html>
