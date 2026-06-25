@@ -128,7 +128,7 @@
     <!-- Excel import -->
     <div class="mb-5">
       <p class="text-sm font-semibold mb-1">1 · Import from Excel (.xlsx)</p>
-      <p class="text-xs text-slate-500 mb-2">First row = headers. Supports <b>Name</b>, <b>Gender</b> and any extra Type columns (Seniority, Department, Level…).</p>
+      <p class="text-xs text-slate-500 mb-2">First row = headers. Supports <b>Name</b>, <b>Gender</b> and <b>Type</b> (e.g. Seniority / Level). Other columns are ignored.</p>
       <input id="fileInput" type="file" accept=".xlsx,.xls,.csv"
         class="block w-full text-sm text-slate-600 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 file:cursor-pointer" />
       <button id="btnTemplate" class="mt-2 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:text-emerald-800 hover:underline">
@@ -139,8 +139,8 @@
     <!-- CSV paste -->
     <div class="mb-4">
       <p class="text-sm font-semibold mb-1">2 · Or paste CSV</p>
-      <p class="text-xs text-slate-500 mb-2">Example: <code>Name,Gender,Department,Seniority</code></p>
-      <textarea id="csvInput" rows="6" placeholder="Name,Gender,Department&#10;Jordan,Female,Sales&#10;Chris,Male,Engineering"
+      <p class="text-xs text-slate-500 mb-2">Example: <code>Name,Gender,Type</code></p>
+      <textarea id="csvInput" rows="6" placeholder="Name,Gender,Type&#10;Jordan,Female,Senior&#10;Chris,Male,Mid"
         class="w-full p-3 rounded-lg border border-slate-200 text-sm font-mono outline-none focus:border-blue-400"></textarea>
       <button id="btnParseCsv" class="mt-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold">Add from CSV</button>
     </div>
@@ -192,8 +192,7 @@ const CONFIG = {
    STATE
    ========================================================================= */
 let state = {
-  members: [],     // { id, name, gender, types:{key:value}, team: null|0..3 }
-  typeKeys: [],    // discovered "Type" columns besides Name/Gender (kept hidden on cards)
+  members: [],     // { id, name, gender, type, team: null|0..3 }
   currentTurn: 0,  // which team's turn it is
   nextId: 1,
 };
@@ -251,9 +250,9 @@ function shuffle(arr) {
 
 /* =========================================================================
    SMART BALANCING (hidden logic)
-   We score how much a candidate would improve balance for a given team by
-   looking at Gender + every discovered Type. A candidate that fills an
-   under-represented attribute on that team scores higher.
+   Cân bằng đội theo thứ tự ưu tiên: GENDER trước -> TYPE sau.
+   Gender được nhân trọng số rất lớn nên luôn được cân bằng trước; chỉ khi
+   các đội đã cân bằng về gender thì Type mới đóng vai trò quyết định.
    ========================================================================= */
 /** Max count of a given attribute value across all teams (the "leader" team). */
 function maxAcrossTeams(getter) {
@@ -264,29 +263,29 @@ function maxAcrossTeams(getter) {
 
 /**
  * Balance score: higher = better for balance.
- * For each attribute value the candidate carries, reward the team that
- * currently has the fewest of that value (relative to the busiest team).
+ * Điểm gender được ưu tiên tuyệt đối (nhân 1000) so với type, nên thuật toán
+ * sẽ "đi từ gender -> type": cân bằng giới tính trước, sau đó mới tới type.
  */
 function balanceScore(member, teamIndex) {
-  let score = 0;
+  let genderScore = 0;
+  let typeScore = 0;
 
-  // Gender balance
+  // 1) Ưu tiên cân bằng GENDER
   if (member.gender) {
     const here = teamMembers(teamIndex).filter(m => m.gender === member.gender).length;
     const max = maxAcrossTeams(i => teamMembers(i).filter(m => m.gender === member.gender).length);
-    score += (max - here) * 2; // weight gender a bit higher
+    genderScore = max - here; // đội đang thiếu giới tính này -> điểm cao hơn
   }
 
-  // Each Type column
-  state.typeKeys.forEach(k => {
-    const v = member.types[k];
-    if (v == null || v === "") return;
-    const here = teamMembers(teamIndex).filter(m => m.types[k] === v).length;
-    const max = maxAcrossTeams(i => teamMembers(i).filter(m => m.types[k] === v).length);
-    score += (max - here);
-  });
+  // 2) Sau đó cân bằng TYPE
+  if (member.type) {
+    const here = teamMembers(teamIndex).filter(m => m.type === member.type).length;
+    const max = maxAcrossTeams(i => teamMembers(i).filter(m => m.type === member.type).length);
+    typeScore = max - here;
+  }
 
-  return score;
+  // Gender nhân trọng số lớn để luôn được cân bằng trước Type
+  return genderScore * 1000 + typeScore;
 }
 
 /**
@@ -530,63 +529,80 @@ function autoAssignRemaining() {
 /* =========================================================================
    DATA IMPORT
    ========================================================================= */
-function addPerson(name, gender, types) {
+function addPerson(name, gender, type) {
   name = (name || "").trim();
   if (!name) return false;
-  const cleanTypes = {};
-  Object.keys(types || {}).forEach(k => {
-    const val = (types[k] ?? "").toString().trim();
-    if (val) {
-      cleanTypes[k] = val;
-      if (!state.typeKeys.includes(k)) state.typeKeys.push(k);
-    }
-  });
   state.members.push({
     id: state.nextId++,
     name,
     gender: (gender || "").toString().trim(),
-    types: cleanTypes,
+    type: (type || "").toString().trim(), // thuộc tính phụ để cân bằng (vd: Senior/Junior…)
     team: null,
   });
   return true;
 }
 
-/** Turn a row object (keyed by header) into name/gender/types. */
+/**
+ * Chuyển mỗi dòng dữ liệu (object có key là tên cột header) thành 1 người.
+ * CHỈ nhận diện 3 cột (không phân biệt hoa/thường):
+ * - "Name"            -> tên (name)
+ * - "Gender" / "Sex"  -> giới tính (gender)
+ * - "Type"            -> thuộc tính phụ để chia đội cân bằng
+ * Mọi cột khác sẽ bị bỏ qua.
+ */
 function ingestRows(rows) {
-  let added = 0;
+  let added = 0; // đếm số người thêm thành công
+
   rows.forEach(row => {
-    let name = "", gender = "";
-    const types = {};
+    let name = "", gender = "", type = "";
+
+    // Duyệt từng cột trong dòng và phân loại theo tên cột
     Object.keys(row).forEach(key => {
-      const k = key.trim();
-      const lk = k.toLowerCase();
+      const lk = key.trim().toLowerCase(); // chữ thường để so sánh không phân biệt hoa/thường
       const val = row[key];
-      if (lk === "name") name = val;
-      else if (lk === "gender" || lk === "sex") gender = val;
-      else if (k) types[k] = val;
+      if (lk === "name") name = val;                          // cột Tên
+      else if (lk === "gender" || lk === "sex") gender = val; // cột Giới tính
+      else if (lk === "type") type = val;                     // cột Type
+      // các cột khác -> bỏ qua
     });
-    if (addPerson(name, gender, types)) added++;
+
+    if (addPerson(name, gender, type)) added++;
   });
+
   render();
   toast(`Added ${added} ${added === 1 ? "person" : "people"} ✓`);
   closeModal("importModal");
 }
 
+/**
+ * Đọc file Excel (.xlsx/.xls) mà người dùng chọn.
+ * Dùng thư viện SheetJS (XLSX) để phân tích file ngay trên trình duyệt.
+ */
 function importExcel(file) {
-  const reader = new FileReader();
+  const reader = new FileReader(); // bộ đọc file của trình duyệt
+
+  // Hàm này chạy SAU KHI file đã được đọc xong vào bộ nhớ
   reader.onload = (e) => {
     try {
+      // 1. Chuyển dữ liệu file thành mảng byte để SheetJS đọc được
       const data = new Uint8Array(e.target.result);
+      // 2. Đọc toàn bộ workbook (file Excel có thể có nhiều sheet)
       const wb = XLSX.read(data, { type: "array" });
+      // 3. Lấy sheet ĐẦU TIÊN trong file
       const sheet = wb.Sheets[wb.SheetNames[0]];
+      // 4. Chuyển sheet thành mảng object; dòng đầu là header, defval:"" để ô trống = chuỗi rỗng
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
       if (rows.length === 0) { toast("No rows found in file."); return; }
+      // 5. Đưa dữ liệu vào danh sách người
       ingestRows(rows);
     } catch (err) {
+      // Bắt lỗi nếu file hỏng hoặc sai định dạng
       toast("Could not read that file.");
       console.error(err);
     }
   };
+
+  // Bắt đầu đọc file dưới dạng ArrayBuffer (kích hoạt reader.onload ở trên)
   reader.readAsArrayBuffer(file);
 }
 
@@ -651,24 +667,29 @@ function exportResults() {
 }
 
 /* =========================================================================
-   DOWNLOAD EXCEL TEMPLATE (built on the fly with SheetJS)
+   TẢI FILE EXCEL MẪU (tạo trực tiếp bằng SheetJS, không cần file có sẵn)
    ========================================================================= */
 function downloadTemplate() {
-  // Header row + a few example people. Name & Gender are recognized specially;
-  // any other column (Department, Seniority…) becomes a balancing "Type".
+  // Dòng đầu là HEADER. Chỉ dùng 3 cột: Name, Gender, Type.
+  // "Name" và "Gender" được nhận diện đặc biệt; "Type" là thuộc tính phụ để cân bằng đội.
   const rows = [
-    ["Name", "Gender", "Department", "Seniority"],
-    ["Jordan Lee",   "Female", "Sales",       "Senior"],
-    ["Chris Morgan", "Male",   "Engineering", "Mid"],
-    ["Taylor Quinn", "Female", "Marketing",   "Junior"],
-    ["Sam Carter",   "Male",   "Design",      "Senior"],
-    ["Alex Rivera",  "Male",   "Support",     "Mid"],
-    ["Robin Hayes",  "Female", "Engineering", "Junior"],
+    ["Name", "Gender", "Type"], // hàng tiêu đề
+    ["Jordan Lee",   "Female", "Senior"],
+    ["Chris Morgan", "Male",   "Mid"],
+    ["Taylor Quinn", "Female", "Junior"],
+    ["Sam Carter",   "Male",   "Senior"],
+    ["Alex Rivera",  "Male",   "Mid"],
+    ["Robin Hayes",  "Female", "Junior"],
   ];
+
+  // Chuyển mảng 2 chiều (array of arrays) thành 1 worksheet
   const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [{ wch: 22 }, { wch: 12 }, { wch: 16 }, { wch: 14 }];
+  // Đặt độ rộng cho từng cột (wch = số ký tự) cho dễ nhìn
+  ws["!cols"] = [{ wch: 22 }, { wch: 12 }, { wch: 14 }];
+  // Tạo workbook mới rồi gắn worksheet vào với tên sheet là "Members"
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Members");
+  // Xuất file .xlsx và kích hoạt tải xuống
   XLSX.writeFile(wb, "team_import_template.xlsx");
   toast("Template downloaded ✓");
 }
@@ -692,17 +713,12 @@ function loadSample() {
     "Logan","Lily","Caleb","Aria","Ryan","Zoe","Nathan","Nora","Daniel","Hannah",
     "Aaron","Layla","Isaac","Riley","Adam"];
   const genders = ["Male","Female"];
-  const depts = ["Engineering","Sales","Marketing","Design","Support"];
-  const senior = ["Junior","Mid","Senior"];
+  const types = ["Junior","Mid","Senior"]; // cột Type mẫu
 
   state.members = [];
-  state.typeKeys = [];
   state.nextId = 1;
   first.forEach((n, idx) => {
-    addPerson(n, genders[idx % 2], {
-      Department: depts[idx % depts.length],
-      Seniority: senior[idx % senior.length],
-    });
+    addPerson(n, genders[idx % 2], types[idx % types.length]);
   });
   state.currentTurn = 0;
   render();
@@ -714,7 +730,7 @@ function loadSample() {
    ========================================================================= */
 function resetAll() {
   if (!confirm("Reset everything? This clears all people and assignments.")) return;
-  state = { members: [], typeKeys: [], currentTurn: 0, nextId: 1 };
+  state = { members: [], currentTurn: 0, nextId: 1 };
   localStorage.removeItem(CONFIG.storageKey);
   render();
   toast("Reset complete.");
@@ -762,7 +778,7 @@ function bindEvents() {
     $("#csvInput").value = "";
   });
   $("#btnQuickAdd").addEventListener("click", () => {
-    if (addPerson($("#qName").value, $("#qGender").value, {})) {
+    if (addPerson($("#qName").value, $("#qGender").value, "")) {
       $("#qName").value = ""; $("#qGender").value = "";
       render();
       toast("Person added ✓");
