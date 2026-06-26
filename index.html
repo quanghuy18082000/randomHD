@@ -128,7 +128,7 @@
     <!-- Excel import -->
     <div class="mb-5">
       <p class="text-sm font-semibold mb-1">1 · Import from Excel (.xlsx)</p>
-      <p class="text-xs text-slate-500 mb-2">First row = headers. Supports <b>Name</b>, <b>Gender</b> and <b>Type</b> (e.g. Seniority / Level). Other columns are ignored.</p>
+      <p class="text-xs text-slate-500 mb-2">First row = headers. Columns: <b>Name</b>, <b>Gender</b> (Male/Female), <b>Type</b> (A/B/C/D), <b>Role</b> (set <b>Captain</b> for the 4 team leaders). Other columns are ignored.</p>
       <input id="fileInput" type="file" accept=".xlsx,.xls,.csv"
         class="block w-full text-sm text-slate-600 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 file:cursor-pointer" />
       <button id="btnTemplate" class="mt-2 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:text-emerald-800 hover:underline">
@@ -139,8 +139,8 @@
     <!-- CSV paste -->
     <div class="mb-4">
       <p class="text-sm font-semibold mb-1">2 · Or paste CSV</p>
-      <p class="text-xs text-slate-500 mb-2">Example: <code>Name,Gender,Type</code></p>
-      <textarea id="csvInput" rows="6" placeholder="Name,Gender,Type&#10;Jordan,Female,Senior&#10;Chris,Male,Mid"
+      <p class="text-xs text-slate-500 mb-2">Example: <code>Name,Gender,Type,Role</code></p>
+      <textarea id="csvInput" rows="6" placeholder="Name,Gender,Type,Role&#10;Alex,Male,,Captain&#10;Chris,Male,A&#10;Pat,Female,C"
         class="w-full p-3 rounded-lg border border-slate-200 text-sm font-mono outline-none focus:border-blue-400"></textarea>
       <button id="btnParseCsv" class="mt-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold">Add from CSV</button>
     </div>
@@ -193,11 +193,17 @@ const CONFIG = {
    ========================================================================= */
 let state = {
   members: [],     // { id, name, gender, type, team: null|0..3 }
+  leaders: [null, null, null, null], // tên Captain ghi đè leader mặc định của 4 đội (null = dùng mặc định)
   currentTurn: 0,  // which team's turn it is
   nextId: 1,
 };
 
 const NUM_TEAMS = CONFIG.teams.length;
+
+/** Tên leader hiển thị của đội i: ưu tiên Captain đã import, nếu không có thì dùng mặc định trong CONFIG. */
+function leaderName(i) {
+  return (state.leaders && state.leaders[i]) || CONFIG.teams[i].leader;
+}
 
 /* =========================================================================
    PERSISTENCE (localStorage)
@@ -252,7 +258,8 @@ function shuffle(arr) {
    SMART BALANCING (hidden logic)
    Cân bằng đội theo thứ tự ưu tiên: GENDER trước -> TYPE sau.
    Gender được nhân trọng số rất lớn nên luôn được cân bằng trước; chỉ khi
-   các đội đã cân bằng về gender thì Type mới đóng vai trò quyết định.
+   các đội đã cân bằng về gender thì Type (A/B/C/D) mới đóng vai trò quyết định.
+   Hiệu quả: thuật toán trải đều Male qua A→B→C→D rồi tới Female qua A→B→C→D.
    ========================================================================= */
 /** Max count of a given attribute value across all teams (the "leader" team). */
 function maxAcrossTeams(getter) {
@@ -360,7 +367,7 @@ function renderTeams() {
           <div class="flex items-center justify-between">
             <div>
               <h3 class="font-bold leading-tight">${escapeHtml(team.name)}</h3>
-              <p class="text-xs opacity-90">👑 Leader: ${escapeHtml(team.leader)}</p>
+              <p class="text-xs opacity-90">👑 Leader: ${escapeHtml(leaderName(i))}</p>
             </div>
             <div class="text-right">
               <div class="text-2xl font-extrabold leading-none">${members.length}<span class="text-sm font-medium opacity-80">/${target}</span></div>
@@ -544,17 +551,19 @@ function addPerson(name, gender, type) {
 
 /**
  * Chuyển mỗi dòng dữ liệu (object có key là tên cột header) thành 1 người.
- * CHỈ nhận diện 3 cột (không phân biệt hoa/thường):
+ * Nhận diện 4 cột (không phân biệt hoa/thường):
  * - "Name"            -> tên (name)
- * - "Gender" / "Sex"  -> giới tính (gender)
- * - "Type"            -> thuộc tính phụ để chia đội cân bằng
+ * - "Gender" / "Sex"  -> giới tính (gender), dùng "Male" / "Female"
+ * - "Type"            -> nhóm phân loại để cân bằng, dùng A / B / C / D
+ * - "Role"            -> nếu là "Captain" thì người này làm leader của đội (không vào pool bốc)
  * Mọi cột khác sẽ bị bỏ qua.
  */
 function ingestRows(rows) {
-  let added = 0; // đếm số người thêm thành công
+  let added = 0;        // đếm số người thường thêm vào pool
+  const captains = [];  // danh sách tên Captain (sẽ làm leader 4 đội)
 
   rows.forEach(row => {
-    let name = "", gender = "", type = "";
+    let name = "", gender = "", type = "", role = "";
 
     // Duyệt từng cột trong dòng và phân loại theo tên cột
     Object.keys(row).forEach(key => {
@@ -562,15 +571,32 @@ function ingestRows(rows) {
       const val = row[key];
       if (lk === "name") name = val;                          // cột Tên
       else if (lk === "gender" || lk === "sex") gender = val; // cột Giới tính
-      else if (lk === "type") type = val;                     // cột Type
+      else if (lk === "type") type = val;                     // cột Type (A/B/C/D)
+      else if (lk === "role") role = val;                     // cột Role (Captain)
       // các cột khác -> bỏ qua
     });
+
+    // Captain -> làm leader, KHÔNG đưa vào pool bốc ngẫu nhiên
+    const roleNorm = (role || "").toString().trim().toLowerCase();
+    if (roleNorm === "captain" || roleNorm === "caption") {
+      const nm = (name || "").trim();
+      if (nm) captains.push(nm);
+      return;
+    }
 
     if (addPerson(name, gender, type)) added++;
   });
 
+  // Gán Captain vào leader 4 đội theo thứ tự xuất hiện (tối đa NUM_TEAMS người)
+  let capMsg = "";
+  if (captains.length) {
+    const n = Math.min(captains.length, NUM_TEAMS);
+    for (let i = 0; i < n; i++) state.leaders[i] = captains[i];
+    capMsg = `, ${n} captain${n === 1 ? "" : "s"} → leaders`;
+  }
+
   render();
-  toast(`Added ${added} ${added === 1 ? "person" : "people"} ✓`);
+  toast(`Added ${added} ${added === 1 ? "person" : "people"}${capMsg} ✓`);
   closeModal("importModal");
 }
 
@@ -639,9 +665,9 @@ function exportResults() {
   CONFIG.teams.forEach((team, i) => {
     const ms = teamMembers(i);
     if (ms.length === 0) {
-      csv += `"${team.name}","${team.leader}",\n`;
+      csv += `"${team.name}","${leaderName(i)}",\n`;
     } else {
-      ms.forEach(m => { csv += `"${team.name}","${team.leader}","${m.name}"\n`; });
+      ms.forEach(m => { csv += `"${team.name}","${leaderName(i)}","${m.name}"\n`; });
     }
   });
   downloadFile("teams.csv", csv, "text/csv");
@@ -651,7 +677,7 @@ function exportResults() {
   txt += "=".repeat(40) + "\n\n";
   CONFIG.teams.forEach((team, i) => {
     const ms = teamMembers(i);
-    txt += `${team.name}  (Leader: ${team.leader})  —  ${ms.length} members\n`;
+    txt += `${team.name}  (Leader: ${leaderName(i)})  —  ${ms.length} members\n`;
     txt += "-".repeat(40) + "\n";
     ms.forEach((m, idx) => { txt += `  ${idx + 1}. ${m.name}\n`; });
     txt += "\n";
@@ -670,22 +696,28 @@ function exportResults() {
    TẢI FILE EXCEL MẪU (tạo trực tiếp bằng SheetJS, không cần file có sẵn)
    ========================================================================= */
 function downloadTemplate() {
-  // Dòng đầu là HEADER. Chỉ dùng 3 cột: Name, Gender, Type.
-  // "Name" và "Gender" được nhận diện đặc biệt; "Type" là thuộc tính phụ để cân bằng đội.
+  // Dòng đầu là HEADER. Dùng 4 cột: Name, Gender, Type, Role.
+  // - Name, Gender: như cũ (Male/Female)
+  // - Type: nhóm phân loại A/B/C/D để cân bằng đội
+  // - Role: ghi "Captain" cho 4 đội trưởng (sẽ thành leader, không vào pool bốc)
   const rows = [
-    ["Name", "Gender", "Type"], // hàng tiêu đề
-    ["Jordan Lee",   "Female", "Senior"],
-    ["Chris Morgan", "Male",   "Mid"],
-    ["Taylor Quinn", "Female", "Junior"],
-    ["Sam Carter",   "Male",   "Senior"],
-    ["Alex Rivera",  "Male",   "Mid"],
-    ["Robin Hayes",  "Female", "Junior"],
+    ["Name", "Gender", "Type", "Role"], // hàng tiêu đề
+    // 4 Captain -> leader của 4 đội (theo thứ tự)
+    ["Alex Rivera",  "Male",   "",  "Captain"],
+    ["Sam Carter",   "Male",   "",  "Captain"],
+    ["Jordan Lee",   "Female", "",  "Captain"],
+    ["Taylor Quinn", "Female", "",  "Captain"],
+    // Thành viên thường
+    ["Chris Morgan", "Male",   "A", ""],
+    ["Robin Hayes",  "Male",   "B", ""],
+    ["Pat Nguyen",   "Female", "C", ""],
+    ["Sky Tran",     "Female", "D", ""],
   ];
 
   // Chuyển mảng 2 chiều (array of arrays) thành 1 worksheet
   const ws = XLSX.utils.aoa_to_sheet(rows);
   // Đặt độ rộng cho từng cột (wch = số ký tự) cho dễ nhìn
-  ws["!cols"] = [{ wch: 22 }, { wch: 12 }, { wch: 14 }];
+  ws["!cols"] = [{ wch: 22 }, { wch: 12 }, { wch: 8 }, { wch: 10 }];
   // Tạo workbook mới rồi gắn worksheet vào với tên sheet là "Members"
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Members");
@@ -713,13 +745,17 @@ function loadSample() {
     "Logan","Lily","Caleb","Aria","Ryan","Zoe","Nathan","Nora","Daniel","Hannah",
     "Aaron","Layla","Isaac","Riley","Adam"];
   const genders = ["Male","Female"];
-  const types = ["Junior","Mid","Senior"]; // cột Type mẫu
+  const types = ["A","B","C","D"]; // cột Type mẫu (A/B/C/D)
+  const captains = ["Alex Rivera","Sam Carter","Jordan Lee","Taylor Quinn"]; // 4 đội trưởng
 
   state.members = [];
+  state.leaders = [null, null, null, null];
   state.nextId = 1;
   first.forEach((n, idx) => {
     addPerson(n, genders[idx % 2], types[idx % types.length]);
   });
+  // Gán Captain làm leader 4 đội
+  captains.forEach((nm, i) => { state.leaders[i] = nm; });
   state.currentTurn = 0;
   render();
   toast("Loaded 45 sample people ✓");
@@ -730,7 +766,7 @@ function loadSample() {
    ========================================================================= */
 function resetAll() {
   if (!confirm("Reset everything? This clears all people and assignments.")) return;
-  state = { members: [], currentTurn: 0, nextId: 1 };
+  state = { members: [], leaders: [null, null, null, null], currentTurn: 0, nextId: 1 };
   localStorage.removeItem(CONFIG.storageKey);
   render();
   toast("Reset complete.");
